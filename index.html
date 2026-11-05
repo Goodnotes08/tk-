@@ -216,7 +216,7 @@ const INK_COLORS = { blue: "#1e3a9f", black: "#17251b", pencil: "#5b6068" };
 let inkColor = INK_COLORS.blue;
 const MAX_PAGES = 20;
 
-/* Auflösung: Seiten werden mehrfach so fein gerendert (scharf beim Hineinzoomen im PDF) */
+/* Auflösung der Vorschau (das PDF selbst ist Vektor und unabhängig davon scharf) */
 const RENDER_SCALE = isAppleMobileDevice() ? 2 : 3;
 
 const drawingCanvas = document.getElementById("drawingCanvas");
@@ -246,8 +246,10 @@ let currentStroke = null;
 let handwriting = loadHandwriting();
 
 /* Zustand beim Erstellen des Arbeitsblatts */
-let pages = [];        // Liste aller Seiten-Canvas
-let ctx = null;        // Kontext der aktuellen Seite
+let pages = [];        // Liste aller Seiten { canvas, background, content }
+let ctx = null;        // Kontext der aktuellen Seite (Canvas + PDF)
+let pdfGlyphs = [];    // Im Arbeitsblatt benutzte Glyphen (je einmal im PDF)
+let pdfGlyphIds = new Map();
 let lineStartX = MARGIN; // Startposition der aktuellen Zeile
 let cx = MARGIN;       // aktuelle x-Position
 let cy = FIRST_BASELINE; // aktuelle Grundlinie
@@ -579,30 +581,13 @@ function drawGlyph(context, glyph, x, baseline, maximumWidth, targetHeight) {
   context.translate(pivotX, baseline);
   context.rotate(jitter(WOBBLE_ANGLE));
   context.translate(-pivotX, -baseline);
+  context.translate(x - bounds.minX * scale, offsetY - bounds.minY * scale);
+  context.scale(scale, scale);
   context.strokeStyle = inkColor;
-  context.lineWidth = Math.max(1.8, 6.5 * scale);
+  context.lineWidth = Math.max(1.8, 6.5 * scale) / scale;
   context.lineCap = "round";
   context.lineJoin = "round";
-
-  glyph.forEach(stroke => {
-    if (stroke.length < 2) return;
-
-    context.beginPath();
-    context.moveTo(
-      x + (stroke[0].x - bounds.minX) * scale,
-      offsetY + (stroke[0].y - bounds.minY) * scale
-    );
-
-    for (let i = 1; i < stroke.length; i++) {
-      context.lineTo(
-        x + (stroke[i].x - bounds.minX) * scale,
-        offsetY + (stroke[i].y - bounds.minY) * scale
-      );
-    }
-
-    context.stroke();
-  });
-
+  context.drawGlyphStrokes(glyph);
   context.restore();
 }
 
@@ -620,6 +605,177 @@ function drawHandwrittenCharacter(context, character, x, baseline, maximumWidth,
   }
 
   drawGlyph(context, glyph, x, baseline, maximumWidth, targetHeight);
+}
+
+/* ---------- Zeichenkontext: Canvas (Vorschau) + PDF-Vektorbefehle ---------- */
+
+function pdfNumber(value, digits = 2) {
+  const factor = 10 ** digits;
+  return String(Math.round(value * factor) / factor);
+}
+
+function pdfColor(hex) {
+  const n = parseInt(String(hex).slice(1), 16) || 0;
+  return [(n >> 16) & 255, (n >> 8) & 255, n & 255]
+    .map(c => pdfNumber(c / 255, 3))
+    .join(" ");
+}
+
+/* Zeichen außerhalb von Latin-1, die WinAnsi trotzdem kennt */
+const WIN_ANSI_EXTRA = {
+  "€": 128, "‚": 130, "„": 132, "…": 133, "‘": 145, "’": 146,
+  "“": 147, "”": 148, "•": 149, "–": 150, "—": 151
+};
+
+function pdfString(text) {
+  let out = "";
+
+  for (const character of text) {
+    let code = WIN_ANSI_EXTRA[character] ?? character.charCodeAt(0);
+
+    if (code > 255 || (code >= 128 && code < 160 && !(character in WIN_ANSI_EXTRA))) {
+      code = 63; // "?"
+    }
+
+    if (character === "(" || character === ")" || character === "\\") {
+      out += "\\" + character;
+    } else if (code < 32 || code > 126) {
+      out += "\\" + code.toString(8).padStart(3, "0");
+    } else {
+      out += String.fromCharCode(code);
+    }
+  }
+
+  return out;
+}
+
+function getPdfGlyphId(glyph) {
+  if (!pdfGlyphIds.has(glyph)) {
+    pdfGlyphIds.set(glyph, pdfGlyphs.length);
+    pdfGlyphs.push(glyph);
+  }
+
+  return pdfGlyphIds.get(glyph);
+}
+
+/* Zeichnet auf den Canvas und schreibt dieselben Befehle als PDF-Vektoren mit */
+function createPageContext(canvasContext, ops) {
+  const state = {
+    strokeStyle: "#000000", fillStyle: "#000000", lineWidth: 1,
+    lineCap: "butt", lineJoin: "miter", font: "10px Arial", textBaseline: "alphabetic"
+  };
+  const stack = [];
+  const CAPS = { butt: 0, round: 1, square: 2 };
+  const JOINS = { miter: 0, round: 1, bevel: 2 };
+  let path = [];
+
+  const strokeState = () =>
+    `${pdfColor(state.strokeStyle)} RG ${pdfNumber(state.lineWidth)} w ` +
+    `${CAPS[state.lineCap] ?? 0} J ${JOINS[state.lineJoin] ?? 0} j`;
+
+  const transform = (a, b, c, d, e, f) =>
+    ops.push(`${[a, b, c, d].map(v => pdfNumber(v, 5)).join(" ")} ${pdfNumber(e)} ${pdfNumber(f)} cm`);
+
+  const context = {
+    save() {
+      canvasContext.save();
+      stack.push({ ...state });
+      ops.push("q");
+    },
+    restore() {
+      canvasContext.restore();
+      Object.assign(state, stack.pop());
+      ops.push("Q");
+    },
+    translate(x, y) {
+      canvasContext.translate(x, y);
+      transform(1, 0, 0, 1, x, y);
+    },
+    rotate(angle) {
+      canvasContext.rotate(angle);
+      const cos = Math.cos(angle), sin = Math.sin(angle);
+      transform(cos, sin, -sin, cos, 0, 0);
+    },
+    scale(x, y) {
+      canvasContext.scale(x, y);
+      transform(x, 0, 0, y, 0, 0);
+    },
+    beginPath() {
+      canvasContext.beginPath();
+      path = [];
+    },
+    moveTo(x, y) {
+      canvasContext.moveTo(x, y);
+      path.push(`${pdfNumber(x)} ${pdfNumber(y)} m`);
+    },
+    lineTo(x, y) {
+      canvasContext.lineTo(x, y);
+      path.push(`${pdfNumber(x)} ${pdfNumber(y)} l`);
+    },
+    stroke() {
+      canvasContext.stroke();
+      if (path.length) ops.push(strokeState(), ...path, "S");
+    },
+    fillRect(x, y, width, height) {
+      canvasContext.fillRect(x, y, width, height);
+      ops.push(
+        `${pdfColor(state.fillStyle)} rg ${pdfNumber(x)} ${pdfNumber(y)} ` +
+        `${pdfNumber(width)} ${pdfNumber(height)} re f`
+      );
+    },
+    fillText(text, x, y) {
+      canvasContext.fillText(text, x, y);
+      const size = parseFloat((state.font.match(/([\d.]+)px/) || [])[1]) || 10;
+      ops.push(
+        `${pdfColor(state.fillStyle)} rg BT /F1 ${pdfNumber(size)} Tf ` +
+        `1 0 0 -1 ${pdfNumber(x)} ${pdfNumber(y)} Tm (${pdfString(text)}) Tj ET`
+      );
+    },
+    /* Gefüllte Punkte (Punktpapier); im PDF als Striche der Länge 0 mit runder Kappe */
+    fillDots(dots, radius) {
+      canvasContext.beginPath();
+      for (const [x, y] of dots) {
+        canvasContext.moveTo(x + radius, y);
+        canvasContext.arc(x, y, radius, 0, Math.PI * 2);
+      }
+      canvasContext.fill();
+
+      if (!dots.length) return;
+      ops.push(`${pdfColor(state.fillStyle)} RG ${pdfNumber(radius * 2)} w 1 J`);
+      for (const [x, y] of dots) {
+        ops.push(`${pdfNumber(x)} ${pdfNumber(y)} m ${pdfNumber(x)} ${pdfNumber(y)} l`);
+      }
+      ops.push("S");
+    },
+    /* Handschrift-Glyphe in ihren Originalkoordinaten; im PDF einmal definiert und wiederverwendet */
+    drawGlyphStrokes(glyph) {
+      for (const stroke of glyph) {
+        if (stroke.length < 2) continue;
+
+        canvasContext.beginPath();
+        canvasContext.moveTo(stroke[0].x, stroke[0].y);
+        for (let i = 1; i < stroke.length; i++) {
+          canvasContext.lineTo(stroke[i].x, stroke[i].y);
+        }
+        canvasContext.stroke();
+      }
+
+      ops.push(`${strokeState()} /G${getPdfGlyphId(glyph)} Do`);
+    }
+  };
+
+  ["strokeStyle", "fillStyle", "lineWidth", "lineCap", "lineJoin", "font", "textBaseline"]
+    .forEach(property => {
+      Object.defineProperty(context, property, {
+        get: () => state[property],
+        set: value => {
+          state[property] = value;
+          canvasContext[property] = value;
+        }
+      });
+    });
+
+  return context;
 }
 
 /* ---------- Seiten ---------- */
@@ -652,17 +808,16 @@ function drawPageLines(context, canvas) {
   } else if (paper === "dots") {
     const step = LINE_HEIGHT / 2;
 
-    context.fillStyle = "#b4c6ba";
-    context.beginPath();
+    const dots = [];
 
     for (let x = MARGIN % step + step; x < canvas.width - 10; x += step) {
       for (let y = FIRST_BASELINE % step + step; y < canvas.height - 10; y += step) {
-        context.moveTo(x + 1.1, y);
-        context.arc(x, y, 1.1, 0, Math.PI * 2);
+        dots.push([x, y]);
       }
     }
 
-    context.fill();
+    context.fillStyle = "#b4c6ba";
+    context.fillDots(dots, 1.1);
   } else {
     for (let baseline = FIRST_BASELINE; baseline < canvas.height - 45; baseline += LINE_HEIGHT) {
       context.beginPath();
@@ -689,13 +844,20 @@ function newPage() {
   pagesElement.appendChild(label);
   pagesElement.appendChild(canvas);
 
-  ctx = canvas.getContext("2d");
-  ctx.scale(RENDER_SCALE, RENDER_SCALE);
-  ctx.fillStyle = "white";
+  const canvasContext = canvas.getContext("2d");
+  canvasContext.scale(RENDER_SCALE, RENDER_SCALE);
+
+  const page = { canvas, background: [], content: [] };
+
+  /* Papier (Linien/Karos/Punkte) separat aufzeichnen: im PDF nur einmal gespeichert */
+  ctx = createPageContext(canvasContext, page.background);
+  ctx.fillStyle = "#ffffff";
   ctx.fillRect(0, 0, PAGE_WIDTH, PAGE_HEIGHT);
   drawPageLines(ctx, { width: PAGE_WIDTH, height: PAGE_HEIGHT });
 
-  pages.push(canvas);
+  ctx = createPageContext(canvasContext, page.content);
+
+  pages.push(page);
 
   lineStartX = MARGIN + jitter(LINE_START_JITTER);
   cx = lineStartX;
@@ -820,6 +982,8 @@ function generateWorksheet() {
 
   pagesElement.innerHTML = "";
   pages = [];
+  pdfGlyphs = [];
+  pdfGlyphIds = new Map();
   newPage();
 
   for (const line of text.split("\n")) {
@@ -877,23 +1041,15 @@ function isAppleMobileDevice() {
   );
 }
 
-function dataUrlToBytes(url) {
-  const binary = atob(url.split(",")[1]);
-  const bytes = new Uint8Array(binary.length);
-
-  for (let i = 0; i < binary.length; i++) {
-    bytes[i] = binary.charCodeAt(i);
-  }
-
-  return bytes;
-}
-
-/* Baut ein mehrseitiges A4-PDF ohne externe Bibliothek (jede Seite = ein JPEG-Bild) */
-function buildPdf(canvases) {
+/* Baut ein mehrseitiges A4-Vektor-PDF ohne externe Bibliothek.
+   Jede Handschrift-Glyphe und das Papiermuster werden nur einmal gespeichert
+   und auf den Seiten wiederverwendet (scharf bei jedem Zoom, kleine Datei). */
+function buildPdf(pageList, glyphs) {
   const encoder = new TextEncoder();
   const parts = [];
   const offsets = [];
   let length = 0;
+  let objectCount = 0;
 
   const push = data => {
     const bytes = typeof data === "string" ? encoder.encode(data) : data;
@@ -901,43 +1057,113 @@ function buildPdf(canvases) {
     length += bytes.length;
   };
 
-  const startObject = number => {
+  const reserve = () => ++objectCount;
+
+  const writeObject = (number, body) => {
     offsets[number] = length;
-    push(`${number} 0 obj\n`);
+    push(`${number} 0 obj\n${body}\nendobj\n`);
+  };
+
+  const writeStream = (number, dictionary, content) => {
+    const bytes = encoder.encode(content);
+    offsets[number] = length;
+    push(`${number} 0 obj\n<< ${dictionary} /Length ${bytes.length} >>\nstream\n`);
+    push(bytes);
+    push("\nendstream\nendobj\n");
   };
 
   const W = 595.28, H = 841.89;
-  const count = canvases.length;
-  const total = 3 + count * 3;
+  const GLYPH_PADDING = 100;
 
   push("%PDF-1.4\n");
 
-  startObject(1);
-  push("<< /Type /Catalog /Pages 2 0 R >>\nendobj\n");
+  const catalogNumber = reserve();
+  const pagesNumber = reserve();
+  const fontNumber = reserve();
+  const resourcesNumber = reserve();
 
-  const kids = canvases.map((_, i) => `${3 + i * 3} 0 R`).join(" ");
-  startObject(2);
-  push(`<< /Type /Pages /Kids [${kids}] /Count ${count} >>\nendobj\n`);
+  /* Glyphen als Form-XObjects in ihren Originalkoordinaten */
+  const glyphNumbers = glyphs.map(glyph => {
+    const number = reserve();
+    const bounds = getGlyphBounds(glyph) || { minX: 0, minY: 0, maxX: 1, maxY: 1 };
+    const content = [];
 
-  canvases.forEach((canvas, i) => {
-    const pageNumber = 3 + i * 3;
-    const contentNumber = pageNumber + 1;
-    const imageNumber = pageNumber + 2;
-    const jpeg = dataUrlToBytes(canvas.toDataURL("image/jpeg", 0.96));
-    const content = `q ${W} 0 0 ${H} 0 0 cm /Im0 Do Q`;
+    for (const stroke of glyph) {
+      if (stroke.length < 2) continue;
+      content.push(`${pdfNumber(stroke[0].x, 1)} ${pdfNumber(stroke[0].y, 1)} m`);
+      for (let i = 1; i < stroke.length; i++) {
+        content.push(`${pdfNumber(stroke[i].x, 1)} ${pdfNumber(stroke[i].y, 1)} l`);
+      }
+    }
+    if (content.length) content.push("S");
 
-    startObject(pageNumber);
-    push(`<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ${W} ${H}] /Resources << /XObject << /Im0 ${imageNumber} 0 R >> >> /Contents ${contentNumber} 0 R >>\nendobj\n`);
+    const bbox = [
+      bounds.minX - GLYPH_PADDING, bounds.minY - GLYPH_PADDING,
+      bounds.maxX + GLYPH_PADDING, bounds.maxY + GLYPH_PADDING
+    ].map(v => pdfNumber(v, 1)).join(" ");
 
-    startObject(contentNumber);
-    push(`<< /Length ${content.length} >>\nstream\n${content}\nendstream\nendobj\n`);
-
-    startObject(imageNumber);
-    push(`<< /Type /XObject /Subtype /Image /Width ${canvas.width} /Height ${canvas.height} /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode /Length ${jpeg.length} >>\nstream\n`);
-    push(jpeg);
-    push("\nendstream\nendobj\n");
+    writeStream(number, `/Type /XObject /Subtype /Form /BBox [${bbox}]`, content.join("\n"));
+    return number;
   });
 
+  /* Papiermuster (gleiche Seiten-Hintergründe nur einmal) */
+  const backgroundIds = new Map();
+  const backgroundNumbers = [];
+  const pageBackgrounds = pageList.map(page => {
+    const content = page.background.join("\n");
+
+    if (!backgroundIds.has(content)) {
+      const number = reserve();
+      writeStream(
+        number,
+        `/Type /XObject /Subtype /Form /BBox [0 0 ${PAGE_WIDTH} ${PAGE_HEIGHT}]`,
+        content
+      );
+      backgroundIds.set(content, backgroundNumbers.length);
+      backgroundNumbers.push(number);
+    }
+
+    return backgroundIds.get(content);
+  });
+
+  /* Seiten: Koordinaten wie im Canvas (Pixel, y nach unten) -> A4 in Punkten */
+  const pageTransform =
+    `${pdfNumber(W / PAGE_WIDTH, 6)} 0 0 ${pdfNumber(-H / PAGE_HEIGHT, 6)} 0 ${H} cm`;
+
+  const pageNumbers = pageList.map((page, i) => {
+    const pageNumber = reserve();
+    const contentNumber = reserve();
+    const content =
+      `q ${pageTransform}\n/B${pageBackgrounds[i]} Do\n${page.content.join("\n")}\nQ`;
+
+    writeObject(
+      pageNumber,
+      `<< /Type /Page /Parent ${pagesNumber} 0 R /MediaBox [0 0 ${W} ${H}] ` +
+      `/Resources ${resourcesNumber} 0 R /Contents ${contentNumber} 0 R >>`
+    );
+    writeStream(contentNumber, "", content);
+    return pageNumber;
+  });
+
+  const xobjects =
+    glyphNumbers.map((n, i) => `/G${i} ${n} 0 R`).join(" ") + " " +
+    backgroundNumbers.map((n, i) => `/B${i} ${n} 0 R`).join(" ");
+
+  writeObject(
+    fontNumber,
+    "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>"
+  );
+  writeObject(
+    resourcesNumber,
+    `<< /Font << /F1 ${fontNumber} 0 R >> /XObject << ${xobjects} >> >>`
+  );
+  writeObject(
+    pagesNumber,
+    `<< /Type /Pages /Kids [${pageNumbers.map(n => `${n} 0 R`).join(" ")}] /Count ${pageNumbers.length} >>`
+  );
+  writeObject(catalogNumber, `<< /Type /Catalog /Pages ${pagesNumber} 0 R >>`);
+
+  const total = objectCount + 1;
   const xrefPosition = length;
   let xref = `xref\n0 ${total}\n0000000000 65535 f \n`;
 
@@ -945,7 +1171,7 @@ function buildPdf(canvases) {
     xref += String(offsets[n]).padStart(10, "0") + " 00000 n \n";
   }
 
-  push(xref + `trailer\n<< /Size ${total} /Root 1 0 R >>\nstartxref\n${xrefPosition}\n%%EOF`);
+  push(xref + `trailer\n<< /Size ${total} /Root ${catalogNumber} 0 R >>\nstartxref\n${xrefPosition}\n%%EOF`);
 
   return new Blob(parts, { type: "application/pdf" });
 }
@@ -986,7 +1212,7 @@ async function downloadWorksheetAsPDF() {
 
   const result = await offerFile(
     "mein-handgeschriebenes-arbeitsblatt.pdf",
-    buildPdf(pages)
+    buildPdf(pages, pdfGlyphs)
   );
 
   downloadInfo.textContent =
