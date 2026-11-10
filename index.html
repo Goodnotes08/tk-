@@ -973,7 +973,7 @@ function drawLongWord(word) {
 }
 
 function generateWorksheet() {
-  const text = document.getElementById("textInput").value;
+  const text = document.getElementById("textInput").value.replace(/\*/g, "");
 
   textScale = Number(sizeRange.value) / 100;
   TARGET_HEIGHT = BASE_TARGET_HEIGHT * textScale;
