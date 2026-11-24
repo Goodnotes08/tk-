@@ -166,7 +166,7 @@ textarea:focus{border-color:var(--accent);box-shadow:0 0 0 3px rgba(79,157,117,.
 </section>
 
 <!-- Bei jeder Änderung Versionsnummer und Datum erhöhen -->
-<p class="app-version">Version 1.5 · 24.11.2026</p>
+<p class="app-version">Version 1.6 · 24.11.2026</p>
 
 </main>
 
@@ -946,7 +946,39 @@ function startLine() {
 }
 
 /* Breite einer Wortlücke: Zeilentempo, Streuung und gelegentliche Pausen */
-function getSpaceWidth(count) {
+/* Enge Lücke bei Abkürzungen und Zeilenangaben ("Z. 3", "vgl. S. 12", "3 f.", "z. B."):
+   nach einem Abkürzungspunkt schreibt man nicht mit vollem Wortabstand weiter */
+const ABBREVIATION_SPACE = 0.5;
+
+const ABBREVIATIONS = new Set([
+  "vgl", "bzw", "ca", "usw", "etc", "nr", "bspw", "ggf", "inkl", "evtl", "abb", "kap", "bd",
+  "hrsg", "jh", "jhd", "dr", "prof", "st", "str", "tel", "sog", "ff", "zit", "anm", "bsp", "ebd"
+]);
+
+function isAbbreviation(word) {
+  const w = word.replace(/^[(„"'»]+/, "");
+  if (!/\.$/.test(w)) return false;
+  const core = w.slice(0, -1);
+
+  return /^\p{L}$/u.test(core) ||                      // Z.  S.  f.  V.
+    /^(\p{L}\.)+\p{L}$/u.test(core) ||                 // z.B.  u.a.  d.h.
+    /^\d{1,2}$/.test(core) ||                          // 3.  19. (Ordnungszahl)
+    ABBREVIATIONS.has(core.toLowerCase());            // vgl.  bzw.  Nr.
+}
+
+function isTightGap(previous, next) {
+  if (!previous || !next) return false;
+  if (isAbbreviation(previous)) return true;
+  if (/\d[).,]*$/.test(previous) && /^(f|ff)\.?[),.;]*$/.test(next)) return true; // "3 f."
+  return false;
+}
+
+function getSpaceWidth(count, previous, next) {
+  if (isTightGap(previous, next)) {
+    const factor = ABBREVIATION_SPACE * (1 + gauss([0.1, 0.2]));
+    return SPACE_WIDTH * textScale * factor;
+  }
+
   let factor = line.tempo * (1 + gauss(SPACE_SPREAD, fatigue()));
 
   if (Math.random() < SPACE_PAUSE_CHANCE) factor += 0.4 + Math.random() * 0.5;
@@ -1127,9 +1159,11 @@ function generateWorksheet() {
 
     const parts = line.match(/\S+|\s+/g) || [];
 
-    for (const part of parts) {
+    for (let k = 0; k < parts.length; k++) {
+      const part = parts[k];
+
       if (/^\s+$/.test(part)) {
-        cx += getSpaceWidth(part.length);
+        cx += getSpaceWidth(part.length, parts[k - 1], parts[k + 1]);
         continue;
       }
 
