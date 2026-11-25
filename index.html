@@ -151,6 +151,10 @@ textarea:focus{border-color:var(--accent);box-shadow:0 0 0 3px rgba(79,157,117,.
       <input id="sizeRange" type="range" min="80" max="115" step="5" value="100">
       <span id="sizeValue">100%</span>
     </label>
+    <label title="Wie stark Zeilen eingerückt, verschoben und schräg sind">Zeilen-Versatz
+      <input id="lineShiftRange" type="range" min="0" max="3" step="1" value="1">
+      <span id="lineShiftValue">Leicht</span>
+    </label>
   </div>
 
   <div class="actions">
@@ -166,7 +170,7 @@ textarea:focus{border-color:var(--accent);box-shadow:0 0 0 3px rgba(79,157,117,.
 </section>
 
 <!-- Bei jeder Änderung Versionsnummer und Datum erhöhen -->
-<p class="app-version">Version 1.6 · 24.11.2026</p>
+<p class="app-version">Version 1.7 · 25.11.2026</p>
 
 </main>
 
@@ -264,6 +268,25 @@ const paperSelect = document.getElementById("paperSelect");
 const inkSelect = document.getElementById("inkSelect");
 const sizeRange = document.getElementById("sizeRange");
 const sizeValue = document.getElementById("sizeValue");
+const lineShiftRange = document.getElementById("lineShiftRange");
+const lineShiftValue = document.getElementById("lineShiftValue");
+
+/* Stufen für den Zeilen-Versatz: Faktor auf Einrückung, Höhe, Schräglage und Welle */
+const LINE_SHIFT_LEVELS = [
+  { label: "Aus", factor: 0 },
+  { label: "Leicht", factor: 0.3 },
+  { label: "Mittel", factor: 0.6 },
+  { label: "Stark", factor: 1 }
+];
+
+try {
+  const savedLevel = localStorage.getItem("lineShiftLevel");
+  if (savedLevel !== null && LINE_SHIFT_LEVELS[savedLevel]) lineShiftRange.value = savedLevel;
+} catch (error) { /* Speicher nicht verfügbar */ }
+
+function lineShiftFactor() {
+  return (LINE_SHIFT_LEVELS[lineShiftRange.value] || LINE_SHIFT_LEVELS[1]).factor;
+}
 const firstVariantButton = document.getElementById("firstVariantButton");
 const secondVariantButton = document.getElementById("secondVariantButton");
 
@@ -929,16 +952,17 @@ function fatigue() {
 /* Würfelt die Eigenheiten einer neuen Zeile aus */
 function startLine() {
   const tired = fatigue();
+  const shift = lineShiftFactor();
 
   lineCount++;
-  lineStartX = MARGIN + Math.random() * LINE_START_SHIFT +
-    (Math.random() < LINE_START_BIG_CHANCE ? 4 + Math.random() * 6 : 0);
+  lineStartX = MARGIN + shift * (Math.random() * LINE_START_SHIFT +
+    (Math.random() < LINE_START_BIG_CHANCE ? 4 + Math.random() * 6 : 0));
   cx = lineStartX;
 
   line = {
-    lift: gauss(LINE_LIFT, tired),
-    tilt: gauss(LINE_TILT, tired) * DEG,
-    waveAmp: (LINE_WAVE[0] + Math.random() * (LINE_WAVE[1] - LINE_WAVE[0])) * tired,
+    lift: gauss(LINE_LIFT, tired * shift),
+    tilt: gauss(LINE_TILT, tired * shift) * DEG,
+    waveAmp: (LINE_WAVE[0] + Math.random() * (LINE_WAVE[1] - LINE_WAVE[0])) * tired * shift,
     waveLength: 180 + Math.random() * 200,
     wavePhase: Math.random() * Math.PI * 2,
     tempo: 1 + gauss(LINE_TEMPO)
@@ -1475,6 +1499,17 @@ document.getElementById("clearTextButton").addEventListener("click", () => {
 
 [paperSelect, inkSelect].forEach(element => {
   element.addEventListener("change", generateWorksheet);
+});
+
+function updateLineShiftLabel() {
+  lineShiftValue.textContent = (LINE_SHIFT_LEVELS[lineShiftRange.value] || LINE_SHIFT_LEVELS[1]).label;
+}
+updateLineShiftLabel();
+
+lineShiftRange.addEventListener("input", () => {
+  updateLineShiftLabel();
+  try { localStorage.setItem("lineShiftLevel", lineShiftRange.value); } catch (error) { /* egal */ }
+  generateWorksheet();
 });
 
 sizeRange.addEventListener("input", () => {
