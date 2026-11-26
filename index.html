@@ -148,7 +148,7 @@ textarea:focus{border-color:var(--accent);box-shadow:0 0 0 3px rgba(79,157,117,.
       </select>
     </label>
     <label>Größe
-      <input id="sizeRange" type="range" min="80" max="115" step="5" value="100">
+      <input id="sizeRange" type="range" min="70" max="115" step="5" value="100">
       <span id="sizeValue">100%</span>
     </label>
     <label title="Wie stark Zeilen eingerückt, verschoben und schräg sind">Zeilen-Versatz
@@ -170,7 +170,7 @@ textarea:focus{border-color:var(--accent);box-shadow:0 0 0 3px rgba(79,157,117,.
 </section>
 
 <!-- Bei jeder Änderung Versionsnummer und Datum erhöhen -->
-<p class="app-version">Version 1.7 · 25.11.2026</p>
+<p class="app-version">Version 1.8 · 26.11.2026</p>
 
 </main>
 
@@ -193,30 +193,40 @@ const characters = [...new Set(characterString)].join("");
 const SOURCE_BASELINE = 245;
 const SOURCE_FONT_SIZE = 230;
 
-const LETTER_GAP = 2.2;
-const SPACE_WIDTH = 20;
+/* Linien wie das GoodNotes-Papier „Liniert, schmal“ (A4): erste Linie bei 50,25 pt, Abstand 17,5 pt, 45 Linien.
+   In App-Pixeln (794 px = 595,28 pt) umgerechnet. */
+const PT = 794 / 595.28;
+const RULED_FIRST = 50.25 * PT;   // ≈ 67,0 px
+const RULED_STEP = 17.5 * PT;     // ≈ 23,3 px
+const RULED_COUNT = 45;
+
+/* Alle Schriftmaße wurden für 38 px Zeilenabstand entworfen -> auf die neue Zeilenhöhe skalieren */
+const U = RULED_STEP / 38;
+
+const LETTER_GAP = 2.2 * U;
+const SPACE_WIDTH = 20 * U;
 
 /* Kleine zufällige Schwankungen, damit es natürlicher wirkt (in Pixeln, Gesamtbereich) */
-const LETTER_GAP_JITTER = 0.9;  // Abstand zwischen Buchstaben: ca. ±0.45 px
+const LETTER_GAP_JITTER = 0.9 * U;  // Abstand zwischen Buchstaben: ca. ±0.45 px
 /* Natürlichere Zeilen und Wörter (Stärken in Pixeln bzw. Grad, Standardabweichung / Obergrenze) */
-const LINE_START_SHIFT = 6;        // Zeilenanfang 0–6 px nach rechts ...
+const LINE_START_SHIFT = 6 * U;        // Zeilenanfang 0–6 px nach rechts ...
 const LINE_START_BIG_CHANCE = 0.12; // ... und manchmal deutlich weiter (4–10 px extra)
-const LINE_LIFT = [0.8, 2];        // ganze Zeile höher/tiefer
+const LINE_LIFT = [0.8 * U, 2 * U];        // ganze Zeile höher/tiefer
 const LINE_TILT = [0.15, 0.35];    // Schräglage der Zeile in Grad
-const LINE_WAVE = [0.5, 1.2];      // sanftes Auf und Ab der Grundlinie (Amplitude)
+const LINE_WAVE = [0.5 * U, 1.2 * U];      // sanftes Auf und Ab der Grundlinie (Amplitude)
 const LINE_TEMPO = [0.15, 0.3];    // Zeile insgesamt enger/lockerer geschrieben
 const SPACE_SPREAD = [0.28, 0.7];  // Streuung jeder Wortlücke (Faktor)
 const SPACE_MIN = 0.72;            // Wortlücke nie enger als 72 %
 const SPACE_PAUSE_CHANCE = 0.12;   // gelegentlich eine deutlich größere Lücke
 const WORD_SIZE = [0.03, 0.07];    // Wortgröße ±
 const WORD_TILT = [0.7, 1.6];      // Neigung pro Wort in Grad
-const WORD_LIFT = [0.5, 1.2];      // Wort höher/tiefer
+const WORD_LIFT = [0.5 * U, 1.2 * U];      // Wort höher/tiefer
 const FATIGUE_MAX = 0.5;           // zum Ende hin bis zu 50 % unruhiger
 const FATIGUE_LINES = 180;         // ... erreicht nach so vielen Zeilen
 
 /* Leichtes "Wackeln" jedes Buchstabens: Größe, Höhe und Neigung */
 const WOBBLE_SIZE = 0.07;   // ca. ±3.5 %
-const WOBBLE_LIFT = 2.6;    // ca. ±1.3 px
+const WOBBLE_LIFT = 2.6 * U;    // ca. ±1.3 px
 const WOBBLE_ANGLE = 0.045; // ca. ±1.3°
 
 function jitter(range) {
@@ -232,18 +242,20 @@ function gauss([sd, limit], factor = 1) {
 
 const DEG = Math.PI / 180;
 
-const NARROW_LEFT_GAP = 0.9;
-const NARROW_RIGHT_GAP = 0.5;
-const NARROW_MIN_ADVANCE = 6;
+const NARROW_LEFT_GAP = 0.9 * U;
+const NARROW_RIGHT_GAP = 0.5 * U;
+const NARROW_MIN_ADVANCE = 6 * U;
 
 /* Seitenlayout */
 const PAGE_WIDTH = 794;
 const PAGE_HEIGHT = 1123;
 const MARGIN = 48;
-const FIRST_BASELINE = 92;
-const LINE_HEIGHT = 38;
-const BASE_MAX_WIDTH = 27;
-const BASE_TARGET_HEIGHT = 31;
+const FIRST_BASELINE = RULED_FIRST;
+const LINE_HEIGHT = RULED_STEP;
+const LAST_BASELINE = RULED_FIRST + (RULED_COUNT - 1) * RULED_STEP;
+const GRID_STEP = 19;   // Karo/Punkte: 5 mm
+const BASE_MAX_WIDTH = 27 * U;
+const BASE_TARGET_HEIGHT = 31 * U;
 let MAX_WIDTH = BASE_MAX_WIDTH;
 let TARGET_HEIGHT = BASE_TARGET_HEIGHT;
 let textScale = 1;
@@ -641,7 +653,7 @@ function drawGlyph(context, glyph, x, baseline, maximumWidth, targetHeight) {
   context.translate(x - bounds.minX * scale, offsetY - bounds.minY * scale);
   context.scale(scale, scale);
   context.strokeStyle = inkColor;
-  context.lineWidth = Math.max(1.8, 6.5 * scale) / scale;
+  context.lineWidth = Math.max(1.5, 6.5 * U * scale) / scale;
   context.lineCap = "round";
   context.lineJoin = "round";
   context.drawGlyphStrokes(glyph);
@@ -864,7 +876,7 @@ function drawPageLines(context, canvas) {
   context.lineWidth = .7;
 
   if (paper === "grid") {
-    const step = LINE_HEIGHT / 2;
+    const step = GRID_STEP;
 
     for (let x = MARGIN % step; x <= canvas.width; x += step) {
       context.beginPath();
@@ -880,7 +892,7 @@ function drawPageLines(context, canvas) {
       context.stroke();
     }
   } else if (paper === "dots") {
-    const step = LINE_HEIGHT / 2;
+    const step = GRID_STEP;
 
     const dots = [];
 
@@ -893,10 +905,12 @@ function drawPageLines(context, canvas) {
     context.fillStyle = "#b4c6ba";
     context.fillDots(dots, 1.1);
   } else {
-    for (let baseline = FIRST_BASELINE; baseline < canvas.height - 45; baseline += LINE_HEIGHT) {
+    /* wie GoodNotes: 45 Linien über die volle Breite */
+    for (let i = 0; i < RULED_COUNT; i++) {
+      const baseline = RULED_FIRST + i * RULED_STEP;
       context.beginPath();
-      context.moveTo(48, baseline);
-      context.lineTo(canvas.width - 48, baseline);
+      context.moveTo(0, baseline);
+      context.lineTo(canvas.width, baseline);
       context.stroke();
     }
   }
@@ -956,7 +970,7 @@ function startLine() {
 
   lineCount++;
   lineStartX = MARGIN + shift * (Math.random() * LINE_START_SHIFT +
-    (Math.random() < LINE_START_BIG_CHANCE ? 4 + Math.random() * 6 : 0));
+    (Math.random() < LINE_START_BIG_CHANCE ? (4 + Math.random() * 6) * U : 0));
   cx = lineStartX;
 
   line = {
@@ -1063,7 +1077,7 @@ function newLine() {
   cy += LINE_HEIGHT;
   startLine();
 
-  if (cy > PAGE_HEIGHT - MARGIN) {
+  if (cy > LAST_BASELINE + 0.5) {
     needPage = true;
   }
 }
